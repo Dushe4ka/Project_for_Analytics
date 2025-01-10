@@ -7,7 +7,11 @@ from langchain_community.vectorstores import FAISS
 from langchain.chains import create_retrieval_chain
 from langchain import hub
 from langchain.chains.combine_documents import create_stuff_documents_chain
-from PyQt6.QtWidgets import QApplication, QMainWindow, QTextEdit, QLineEdit, QPushButton, QVBoxLayout, QWidget, QLabel, QMessageBox, QFileDialog
+from langchain.memory import ConversationBufferMemory  # Импортируем модуль памяти
+from PyQt6.QtWidgets import QApplication, QMainWindow, QTextEdit, QLineEdit, QPushButton, QVBoxLayout, QWidget, QLabel, QMessageBox, QFileDialog, QMenuBar
+import os
+import faiss  # Убедитесь, что библиотека faiss установлена
+import pickle
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -21,14 +25,29 @@ embed_model = OllamaEmbeddings(model="llama3.2", base_url="http://127.0.0.1:1143
 # Инициализация пустого векторного хранилища
 vector_store = None
 
-# Список для хранения истории сообщений
-message_history = []
+# Инициализация памяти для хранения истории взаимодействий
+memory = ConversationBufferMemory(memory_key="chat_history")
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Text Input for Info Finder")
         self.resize(800, 600)
+
+        # Создание меню
+        self.menu_bar = QMenuBar(self)
+        self.setMenuBar(self.menu_bar)
+
+        # Создание меню "Файл"
+        file_menu = self.menu_bar.addMenu("Файл")
+
+        # Кнопка для сохранения векторного хранилища
+        save_vector_action = file_menu.addAction("Сохранить векторное хранилище")
+        save_vector_action.triggered.connect(self.save_vector_store)
+
+        # Кнопка для загрузки векторного хранилища
+        load_vector_action = file_menu.addAction("Загрузить векторное хранилище")
+        load_vector_action.triggered.connect(self.load_vector_store)
 
         self.layout = QVBoxLayout()
 
@@ -116,9 +135,37 @@ class MainWindow(QMainWindow):
 
         QMessageBox.information(self, "Успех", "Текст успешно сохранен!")
 
+    def save_vector_store(self):
+        global vector_store
+        if vector_store is not None:
+            faiss.write_index(vector_store.index, "vector_store.index")
+            # Сохраняем docstore и index_to_docstore_id
+            with open("docstore.pkl", "wb") as f:
+                pickle.dump(vector_store.docstore, f)
+            with open("index_to_docstore_id.pkl", "wb") as f:
+                pickle.dump(vector_store.index_to_docstore_id, f)
+
+            QMessageBox.information(self, "Успех", "Векторное хранилище успешно сохранено!")
+        else:
+            QMessageBox.warning(self, "Предупреждение", "Нет данных для сохранения.")
+
+    def load_vector_store(self):
+        global vector_store
+        if os.path.exists("vector_store.index"):
+            index = faiss.read_index("vector_store.index")
+            # Загружаем docstore и index_to_docstore_id
+            with open("docstore.pkl", "rb") as f:
+                docstore = pickle.load(f)
+            with open("index_to_docstore_id.pkl", "rb") as f:
+                index_to_docstore_id = pickle.load(f)
+
+            vector_store = FAISS(index=index, docstore=docstore, index_to_docstore_id=index_to_docstore_id, embedding_function=embed_model)
+            QMessageBox.information(self, "Успех", "Векторное хранилище успешно загружено!")
+        else:
+            QMessageBox.warning(self, "Ошибка", "Файл векторного хранилища не найден.")
+
     def ask_question(self):
         global vector_store
-        global message_history
         user_input = self.input_line.text()
 
         if not user_input.strip():
@@ -126,22 +173,24 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            # Добавляем запрос пользователя в историю
-            message_history.append(f"User: {user_input}")
-            if len(message_history) > 10:
-                message_history = message_history[-10:]  # Ограничиваем количество сообщений в истории
+            # Сохраняем контекст в памяти
+            memory.save_context({"input": user_input}, {"output": ""})
 
-            # Обновляем текстовое поле истории
-            self.history_text.setPlainText("\n".join(message_history))
+            # Получаем историю сообщений
+            chat_history = memory.load_memory_variables({})
 
-            context = "\n".join(message_history) + "\nOllama:"
+            # Формируем контекст из сообщений
+            context = chat_history.get("chat_history", "")
 
             if vector_store is None:
                 response = llm.invoke(context)
                 self.result_text.setText(response)
-                # Добавляем ответ модели в историю сразу
-                message_history.append(f"Ollama: {response}")
-                self.history_text.setPlainText("\n".join(message_history))  # Обновляем историю
+
+                # Сохраняем ответ в памяти
+                memory.save_context({"input": user_input}, {"output": response})
+
+                # Обновляем историю
+                self.history_text.setPlainText(context)
                 return
 
             retriever = vector_store.as_retriever()
@@ -151,9 +200,13 @@ class MainWindow(QMainWindow):
 
             response = retrieval_chain.invoke({"input": context})
             self.result_text.setText(response['answer'])
-            # Добавляем ответ модели в историю сразу
-            message_history.append(f"Ollama: {response['answer']}")
-            self.history_text.setPlainText("\n".join(message_history))  # Обновляем историю
+
+            # Сохраняем ответ в памяти
+            memory.save_context({"input": user_input}, {"output": response['answer']})
+
+            # Обновляем историю
+            chat_history = memory.load_memory_variables({})
+            self.history_text.setPlainText(chat_history.get("chat_history", ""))
 
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Произошла ошибка: {str(e)}")
