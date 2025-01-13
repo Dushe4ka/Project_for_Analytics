@@ -99,7 +99,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(container)
 
     def load_file(self):
-        file_name, _ = QFileDialog.getOpenFileName(self, "Выберите файл", "", "Text Files (*.txt);;PDF Files (*.pdf);;All Files (*)")
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, "Выберите файл", "", "Text Files (*.txt);;PDF Files (*.pdf);;Word Files (*.doc *.docx);;All Files (*)"
+        )
         if file_name:
             try:
                 if file_name.endswith('.pdf'):
@@ -109,6 +111,12 @@ class MainWindow(QMainWindow):
                     for page in pdf_document:
                         text += page.get_text()
                     pdf_document.close()
+                    self.text_input.setPlainText(text)
+                elif file_name.endswith(('.doc', '.docx')):
+                    # Загрузка Word файла
+                    from docx import Document
+                    doc = Document(file_name)
+                    text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
                     self.text_input.setPlainText(text)
                 else:
                     # Загрузка текстового файла
