@@ -3,15 +3,20 @@ import fitz  # PyMuPDF
 from langchain_ollama import OllamaLLM, OllamaEmbeddings
 from dotenv import load_dotenv
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
-from langchain.chains import create_retrieval_chain
-from langchain import hub
-from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.memory import ConversationBufferMemory  # Импортируем модуль памяти
-from PyQt6.QtWidgets import QApplication, QMainWindow, QTextEdit, QLineEdit, QPushButton, QVBoxLayout, QWidget, QLabel, QMessageBox, QFileDialog, QMenuBar
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import Distance, VectorParams
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QTextEdit, QLineEdit, QPushButton,
+    QVBoxLayout, QWidget, QLabel, QMessageBox, QFileDialog, QMenuBar
+)
+import logging
 import os
-import faiss  # Убедитесь, что библиотека faiss установлена
-import pickle
+import uuid
+
+# Настройка логирования
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -22,11 +27,40 @@ llm = OllamaLLM(model="llama3.2", base_url="http://127.0.0.1:11434")
 # Настройка встраиваний Ollama
 embed_model = OllamaEmbeddings(model="llama3.2", base_url="http://127.0.0.1:11434")
 
-# Инициализация пустого векторного хранилища
-vector_store = None
+# Инициализация клиента Qdrant
+qdrant_client = QdrantClient(host="localhost", port=6333, timeout=30)
+collection_name = "documents"
 
 # Инициализация памяти для хранения истории взаимодействий
 memory = ConversationBufferMemory(memory_key="chat_history")
+
+def initialize_qdrant():
+    try:
+        # Проверка доступности сервера Qdrant через список коллекций
+        try:
+            collections = qdrant_client.get_collections()
+            logger.info("Соединение с Qdrant успешно установлено.")
+        except Exception as e:
+            raise ConnectionError(f"Не удалось подключиться к серверу Qdrant: {e}")
+
+        # Определение размера вектора
+        test_vector = embed_model.embed_query("test")
+        vector_size = len(test_vector)
+
+        # Проверка существования коллекции
+        if collection_name not in [col.name for col in collections.collections]:
+            qdrant_client.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+            )
+            logger.info(f"Коллекция '{collection_name}' успешно создана.")
+        else:
+            logger.info(f"Коллекция '{collection_name}' уже существует.")
+
+    except Exception as e:
+        logger.error(f"Ошибка при инициализации Qdrant: {e}")
+
+initialize_qdrant()
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -44,10 +78,6 @@ class MainWindow(QMainWindow):
         # Кнопка для сохранения векторного хранилища
         save_vector_action = file_menu.addAction("Сохранить векторное хранилище")
         save_vector_action.triggered.connect(self.save_vector_store)
-
-        # Кнопка для загрузки векторного хранилища
-        load_vector_action = file_menu.addAction("Загрузить векторное хранилище")
-        load_vector_action.triggered.connect(self.load_vector_store)
 
         self.layout = QVBoxLayout()
 
@@ -127,7 +157,6 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить файл: {str(e)}")
 
     def save_text(self):
-        global vector_store
         user_text = self.text_input.toPlainText()
         if user_text.strip() == "":
             QMessageBox.warning(self, "Предупреждение", "Пожалуйста, введите текст перед сохранением.")
@@ -136,44 +165,24 @@ class MainWindow(QMainWindow):
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=128)
         chunks = text_splitter.split_text(user_text)
 
-        if vector_store is None:
-            vector_store = FAISS.from_texts(chunks, embed_model)
-        else:
-            vector_store.add_texts(chunks)
-
-        QMessageBox.information(self, "Успех", "Текст успешно сохранен!")
+        try:
+            for chunk in chunks:
+                embedding = embed_model.embed_query(chunk)
+                logger.debug(f"Вектор для текста: {chunk[:30]}...: {embedding}")
+                qdrant_client.upsert(collection_name=collection_name, points=[{
+                    "id": str(uuid.uuid4()),  # Генерация уникального UUID
+                    "vector": embedding,
+                    "payload": {"text": chunk}
+                }])
+            QMessageBox.information(self, "Успех", "Текст успешно сохранен в Qdrant!")
+        except Exception as e:
+            logger.error(f"Ошибка сохранения текста в Qdrant: {e}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить текст: {str(e)}")
 
     def save_vector_store(self):
-        global vector_store
-        if vector_store is not None:
-            faiss.write_index(vector_store.index, "vector_store.index")
-            # Сохраняем docstore и index_to_docstore_id
-            with open("docstore.pkl", "wb") as f:
-                pickle.dump(vector_store.docstore, f)
-            with open("index_to_docstore_id.pkl", "wb") as f:
-                pickle.dump(vector_store.index_to_docstore_id, f)
-
-            QMessageBox.information(self, "Успех", "Векторное хранилище успешно сохранено!")
-        else:
-            QMessageBox.warning(self, "Предупреждение", "Нет данных для сохранения.")
-
-    def load_vector_store(self):
-        global vector_store
-        if os.path.exists("vector_store.index"):
-            index = faiss.read_index("vector_store.index")
-            # Загружаем docstore и index_to_docstore_id
-            with open("docstore.pkl", "rb") as f:
-                docstore = pickle.load(f)
-            with open("index_to_docstore_id.pkl", "rb") as f:
-                index_to_docstore_id = pickle.load(f)
-
-            vector_store = FAISS(index=index, docstore=docstore, index_to_docstore_id=index_to_docstore_id, embedding_function=embed_model)
-            QMessageBox.information(self, "Успех", "Векторное хранилище успешно загружено!")
-        else:
-            QMessageBox.warning(self, "Ошибка", "Файл векторного хранилища не найден.")
+        QMessageBox.information(self, "Информация", "Данные сохраняются автоматически в Qdrant.")
 
     def ask_question(self):
-        global vector_store
         user_input = self.input_line.text()
 
         if not user_input.strip():
@@ -190,35 +199,27 @@ class MainWindow(QMainWindow):
             # Формируем контекст из сообщений
             context = chat_history.get("chat_history", "")
 
-            if vector_store is None:
-                response = llm.invoke(context)
-                self.result_text.setText(response)
+            query_embedding = embed_model.embed_query(user_input)
+            search_results = qdrant_client.search(
+                collection_name=collection_name,
+                query_vector=query_embedding,
+                limit=5
+            )
 
-                # Сохраняем ответ в памяти
-                memory.save_context({"input": user_input}, {"output": response})
+            response = "\n".join([res.payload["text"] for res in search_results])
 
-                # Обновляем историю
-                self.history_text.setPlainText(context)
-                return
-
-            retriever = vector_store.as_retriever()
-            retrieval_qa_chat_prompt = hub.pull("langchain-ai/retrieval-qa-chat")
-            combine_docs_chain = create_stuff_documents_chain(llm, retrieval_qa_chat_prompt)
-            retrieval_chain = create_retrieval_chain(retriever, combine_docs_chain)
-
-            response = retrieval_chain.invoke({"input": context})
-            self.result_text.setText(response['answer'])
+            self.result_text.setText(response)
 
             # Сохраняем ответ в памяти
-            memory.save_context({"input": user_input}, {"output": response['answer']})
+            memory.save_context({"input": user_input}, {"output": response})
 
             # Обновляем историю
             chat_history = memory.load_memory_variables({})
             self.history_text.setPlainText(chat_history.get("chat_history", ""))
 
         except Exception as e:
+            logger.error(f"Ошибка запроса Qdrant: {e}")
             QMessageBox.critical(self, "Ошибка", f"Произошла ошибка: {str(e)}")
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
