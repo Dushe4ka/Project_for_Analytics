@@ -8,8 +8,10 @@ from qdrant_client import QdrantClient
 from qdrant_client.http.models import Distance, VectorParams
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QTextEdit, QLineEdit, QPushButton,
-    QVBoxLayout, QWidget, QLabel, QMessageBox, QFileDialog, QMenuBar, QComboBox
+    QVBoxLayout, QWidget, QLabel, QMessageBox, QFileDialog, QMenuBar,
+    QSplitter, QListWidget, QListWidgetItem, QInputDialog, QHBoxLayout, QMenu
 )
+from PyQt6.QtCore import Qt
 import logging
 import os
 import uuid
@@ -31,24 +33,18 @@ embed_model = OllamaEmbeddings(model="llama3.2", base_url="http://127.0.0.1:1143
 qdrant_client = QdrantClient(host="localhost", port=6333, timeout=30)
 collection_name = "documents"
 
-# Инициализация памяти для хранения истории взаимодействий
-memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
-# Список чатов
+# Хранилище чатов
 chat_sessions = {}
 
 
 def initialize_qdrant():
     try:
-        # Проверка доступности сервера Qdrant через список коллекций
         collections = qdrant_client.get_collections()
         logger.info("Соединение с Qdrant успешно установлено.")
 
-        # Определение размера вектора
         test_vector = embed_model.embed_query("test")
         vector_size = len(test_vector)
 
-        # Проверка существования коллекции
         if collection_name not in [col.name for col in collections.collections]:
             qdrant_client.create_collection(
                 collection_name=collection_name,
@@ -68,82 +64,116 @@ initialize_qdrant()
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Text Input for Info Finder")
-        self.resize(800, 600)
+        self.setWindowTitle("AI Chat")
+        self.resize(900, 600)
 
-        # Инициализация памяти (можно сделать это также в функции load_data)
-        self.memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+        # Создание главного контейнера
+        main_layout = QHBoxLayout()
+        splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # Создание меню
-        self.menu_bar = QMenuBar(self)
-        self.setMenuBar(self.menu_bar)
+        # **Левая панель (список чатов)**
+        self.chat_list = QListWidget()
+        self.chat_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.chat_list.customContextMenuRequested.connect(self.show_chat_context_menu)
+        self.chat_list.itemDoubleClicked.connect(self.rename_chat)
+        self.chat_list.itemClicked.connect(self.switch_chat)
 
-        # Создание меню "Файл"
-        file_menu = self.menu_bar.addMenu("Файл")
+        # **Правая панель (основной интерфейс)**
+        self.central_widget = QWidget()
+        chat_layout = QVBoxLayout()
 
-        # Кнопка для сохранения векторного хранилища
-        save_vector_action = file_menu.addAction("Сохранить векторное хранилище")
-        save_vector_action.triggered.connect(self.save_vector_store)
-
-        self.layout = QVBoxLayout()
-
-        # Заголовок
-        self.label = QLabel("Введите текст для анализа:")
-        self.layout.addWidget(self.label)
-
-        # Поле ввода текста
-        self.text_input = QTextEdit()
-        self.layout.addWidget(self.text_input)
-
-        # Кнопка загрузки файла
+        # Поле загрузки файлов
         self.load_button = QPushButton("Загрузить файл")
         self.load_button.clicked.connect(self.load_file)
-        self.layout.addWidget(self.load_button)
-
-        # Кнопка сохранения текста
-        self.save_button = QPushButton("Сохранить текст")
-        self.save_button.clicked.connect(self.save_text)
-        self.layout.addWidget(self.save_button)
-
-        # Заголовок для запроса
-        self.label_query = QLabel("Введите запрос:")
-        self.layout.addWidget(self.label_query)
+        chat_layout.addWidget(self.load_button)
 
         # Поле ввода запроса
         self.input_line = QLineEdit()
-        self.layout.addWidget(self.input_line)
+        chat_layout.addWidget(QLabel("Введите запрос:"))
+        chat_layout.addWidget(self.input_line)
 
         # Кнопка для запроса
-        self.query_button = QPushButton("Задать вопрос")
+        self.query_button = QPushButton("Отправить")
         self.query_button.clicked.connect(self.ask_question)
-        self.layout.addWidget(self.query_button)
+        chat_layout.addWidget(self.query_button)
 
-        # Поле для отображения результата
+        # Поле вывода результата
         self.result_text = QTextEdit()
         self.result_text.setReadOnly(True)
-        self.layout.addWidget(self.result_text)
+        chat_layout.addWidget(self.result_text)
 
-        # Поле для отображения истории запросов
+        # Поле истории чата
         self.history_text = QTextEdit()
         self.history_text.setReadOnly(True)
-        self.layout.addWidget(QLabel("История запросов:"))
-        self.layout.addWidget(self.history_text)
+        chat_layout.addWidget(QLabel("История сообщений:"))
+        chat_layout.addWidget(self.history_text)
 
-        # Дропдаун для выбора чата
-        self.chat_selector = QComboBox()
-        self.chat_selector.addItem("Новый чат")
-        self.layout.addWidget(QLabel("Выберите чат:"))
-        self.layout.addWidget(self.chat_selector)
-
-        # Кнопка для создания нового чата
+        # Кнопка создания нового чата
         self.new_chat_button = QPushButton("Новый чат")
         self.new_chat_button.clicked.connect(self.create_new_chat)
-        self.layout.addWidget(self.new_chat_button)
+        chat_layout.addWidget(self.new_chat_button)
 
-        # Создание контейнера и установка центрального виджета
+        self.central_widget.setLayout(chat_layout)
+
+        # Добавление в сплиттер
+        splitter.addWidget(self.chat_list)
+        splitter.addWidget(self.central_widget)
+        splitter.setSizes([200, 700])  # Устанавливаем размеры колонок
+
+        main_layout.addWidget(splitter)
         container = QWidget()
-        container.setLayout(self.layout)
+        container.setLayout(main_layout)
         self.setCentralWidget(container)
+
+        # Инициализация первого чата
+        self.create_new_chat()
+
+    def create_new_chat(self):
+        chat_id = str(uuid.uuid4())[:8]
+        chat_name = f"Чат {len(chat_sessions) + 1}"
+        chat_sessions[chat_id] = {
+            "name": chat_name,
+            "memory": ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+        }
+        item = QListWidgetItem(chat_name)
+        item.setData(Qt.ItemDataRole.UserRole, chat_id)
+        self.chat_list.addItem(item)
+        self.chat_list.setCurrentItem(item)
+        self.switch_chat(item)
+
+    def switch_chat(self, item):
+        chat_id = item.data(Qt.ItemDataRole.UserRole)
+        chat_data = chat_sessions[chat_id]
+        self.setWindowTitle(f"AI Chat - {chat_data['name']}")
+
+        self.current_chat_id = chat_id
+        self.memory = chat_data["memory"]
+
+        chat_history = self.memory.load_memory_variables({})
+        history = "\n".join(str(item) for item in chat_history.get("chat_history", []))
+        self.history_text.setPlainText(history)
+
+    def rename_chat(self, item):
+        chat_id = item.data(Qt.ItemDataRole.UserRole)
+        new_name, ok = QInputDialog.getText(self, "Переименование чата", "Введите новое название:", text=item.text())
+
+        if ok and new_name.strip():
+            chat_sessions[chat_id]["name"] = new_name.strip()
+            item.setText(new_name.strip())
+
+    def show_chat_context_menu(self, pos):
+        item = self.chat_list.itemAt(pos)
+        if item:
+            menu = QMenu(self)
+            delete_action = menu.addAction("Удалить чат")
+            action = menu.exec(self.chat_list.mapToGlobal(pos))
+            if action == delete_action:
+                self.delete_chat(item)
+
+    def delete_chat(self, item):
+        chat_id = item.data(Qt.ItemDataRole.UserRole)
+        del chat_sessions[chat_id]
+        self.chat_list.takeItem(self.chat_list.row(item))
 
     def load_file(self):
         file_name, _ = QFileDialog.getOpenFileName(
@@ -157,54 +187,27 @@ class MainWindow(QMainWindow):
                     for page in pdf_document:
                         text += page.get_text()
                     pdf_document.close()
-                    self.text_input.setPlainText(text)
                 elif file_name.endswith(('.doc', '.docx')):
                     from docx import Document
                     doc = Document(file_name)
                     text = "\n".join([paragraph.text for paragraph in doc.paragraphs])
-                    self.text_input.setPlainText(text)
                 else:
                     with open(file_name, 'r', encoding='utf-8') as f:
-                        file_content = f.read()
-                        self.text_input.setPlainText(file_content)
-
-                # Автоматическое сохранение текста в Pinecone
-                self.save_text()
+                        text = f.read()
 
             except Exception as e:
                 QMessageBox.critical(self, "Ошибка", f"Не удалось загрузить файл: {str(e)}")
 
-    def save_text(self):
-        user_text = self.text_input.toPlainText()
-        if user_text.strip() == "":
-            QMessageBox.warning(self, "Предупреждение", "Пожалуйста, введите текст перед сохранением.")
-            return
+                text_splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=128)
+                chunks = text_splitter.split_text(text)
 
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=128)
-        chunks = text_splitter.split_text(user_text)
+                for chunk in chunks:
+                    embedding = embed_model.embed_query(chunk)
+                    qdrant_client.upsert(collection_name=collection_name, points=[{
+                        "id": str(uuid.uuid4()), "vector": embedding, "payload": {"text": chunk}
+                    }])
 
-        try:
-            for chunk in chunks:
-                embedding = embed_model.embed_query(chunk)
-                logger.debug(f"Вектор для текста: {chunk[:30]}...: {embedding}")
-                qdrant_client.upsert(collection_name=collection_name, points=[{
-                    "id": str(uuid.uuid4()),
-                    "vector": embedding,
-                    "payload": {"text": chunk}
-                }])
-            QMessageBox.information(self, "Успех", "Текст успешно сохранен в Qdrant!")
-        except Exception as e:
-            logger.error(f"Ошибка сохранения текста в Qdrant: {e}")
-            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить текст: {str(e)}")
-
-    def save_vector_store(self):
-        QMessageBox.information(self, "Информация", "Данные сохраняются автоматически в Qdrant.")
-
-    def create_new_chat(self):
-        new_chat_id = str(uuid.uuid4())
-        chat_sessions[new_chat_id] = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-        self.chat_selector.addItem(f"Чат {new_chat_id[:8]}")
-        QMessageBox.information(self, "Новый чат", f"Чат с ID {new_chat_id[:8]} был создан.")
+                QMessageBox.information(self, "Успех", "Файл загружен в Qdrant!")
 
     def ask_question(self):
         user_input = self.input_line.text()
